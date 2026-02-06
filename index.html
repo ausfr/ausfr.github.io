@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nomad Tool (Final + Print)</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<style>
+  :root { --accent: #000; --bg: #f4f7f6; --border: #ccc; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); padding: 20px; display: flex; justify-content: center; }
+  .app { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); width: 100%; max-width: 950px; border-top: 5px solid var(--accent); }
+  h2 { margin: 0 0 20px 0; border-bottom: 1px solid #eee; padding-bottom: 10px; font-size: 22px; }
+  .layout { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; }
+  @media(max-width:768px){ .layout { grid-template-columns: 1fr; } }
+  .controls { display: flex; flex-direction: column; gap: 12px; }
+  label { font-weight: 700; font-size: 11px; color: #666; margin-bottom: 2px; display: block; text-transform: uppercase; }
+  input { width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: 4px; box-sizing: border-box; font-size: 14px; }
+  .preview-pane { text-align: center; background: #eee; padding: 15px; border-radius: 6px; }
+  canvas { background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.15); max-width: 100%; height: auto; border: 1px solid #999; }
+  .btn-group { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 15px; }
+  button { background: var(--accent); color: white; border: none; padding: 15px; font-weight: bold; border-radius: 4px; cursor: pointer; font-size: 14px; }
+  button:disabled { background: #999; cursor: wait; }
+  .print-btn { background: #27ae60; }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <h2>Nomad Backing Card Tool</h2>
+  <div class="layout">
+    <div class="controls">
+      <label>1. Upload PDF</label>
+      <input type="file" id="pdfIn" accept="application/pdf">
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
+        <div><label>2. Start Date</label><input type="date" id="dateIn"></div>
+        <div><label>3. Pharmacy Logo</label><input type="file" id="logoIn" accept="image/png, image/jpeg"></div>
+      </div>
+      <hr style="border:0; border-top:1px solid #eee; margin: 10px 0;">
+      <label>Patient Name</label>
+      <input type="text" id="nameIn" oninput="render()">
+      <label>Address</label>
+      <input type="text" id="addrIn" oninput="render()">
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
+        <div><label>Checked By (Top)</label><input type="text" id="checkIn" oninput="render()"></div>
+        <div><label>Dispensed By (Bottom)</label><input type="text" id="dispIn" value="A. Francis" oninput="render()"></div>
+      </div>
+      
+      <div class="btn-group">
+        <button id="dlBtn" onclick="generate(true)" disabled>Save PDF</button>
+        <button id="prBtn" class="print-btn" onclick="generate(false)" disabled>Print Directly</button>
+      </div>
+    </div>
+    <div class="preview-pane">
+      <canvas id="cvs"></canvas>
+    </div>
+  </div>
+</div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+let appState = { pdfBuffer: null, logoBuffer: null, logoType: null, startDate: null };
+
+function formatDate(d) {
+  if(!d) return "";
+  const day = d.getDate();
+  let s = "th";
+  if(day === 1 || day === 21 || day === 31) s = "st"; else if(day === 2 || day === 22) s = "nd"; else if(day === 3 || day === 23) s = "rd";
+  return d.toLocaleDateString('en-GB', { weekday: 'long' }) + ` ${day}${s} ` + d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+}
+
+document.getElementById('pdfIn').addEventListener('change', async (e) => {
+  if(!e.target.files[0]) return;
+  appState.pdfBuffer = await e.target.files[0].arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({data: appState.pdfBuffer.slice(0)}).promise;
+  const page = await pdf.getPage(1);
+  const content = await page.getTextContent();
+  const items = content.items.map(i => i.str.trim()).filter(x => x);
+  let name = "", addr = "";
+  for(let i=0; i<items.length; i++){
+    if(items[i].toLowerCase() === "patient" && items[i+1]) name = items[i+1].split(/Keep\s+out/i)[0].trim();
+    if(items[i].toLowerCase().startsWith("address")) addr = (items[i].split(":")[1] || items[i+1]).trim();
+  }
+  document.getElementById('nameIn').value = name;
+  document.getElementById('addrIn').value = addr;
+  document.getElementById('dlBtn').disabled = false;
+  document.getElementById('prBtn').disabled = false;
+  render();
+});
+
+['dateIn', 'logoIn'].forEach(id => {
+  document.getElementById(id).addEventListener('change', async (e) => {
+    if(id === 'dateIn') appState.startDate = new Date(e.target.value + "T12:00:00");
+    else if(e.target.files[0]) {
+      appState.logoBuffer = await e.target.files[0].arrayBuffer();
+      appState.logoType = e.target.files[0].type.includes('png') ? 'png' : 'jpg';
+    }
+    render();
+  });
+});
+
+async function render() {
+  const canvas = document.getElementById('cvs');
+  const ctx = canvas.getContext('2d');
+  canvas.width = 595; canvas.height = 842;
+  ctx.fillStyle = "white"; ctx.fillRect(0,0,595,842);
+  ctx.strokeStyle = "#ccc"; ctx.setLineDash([8,8]);
+  ctx.beginPath(); ctx.moveTo(0,421); ctx.lineTo(595,421); ctx.stroke();
+  ctx.setLineDash([]); ctx.strokeStyle = "#000";
+
+  const name = document.getElementById('nameIn').value;
+  const addr = document.getElementById('addrIn').value;
+  const dateStr = formatDate(appState.startDate);
+
+  if(appState.logoBuffer) {
+    const img = await createImageBitmap(new Blob([appState.logoBuffer]));
+    const w = 90; const h = (w/img.width)*img.height;
+    ctx.drawImage(img, 465, 30, w, h);
+  }
+
+  ctx.fillStyle = "#000"; ctx.textAlign = "center";
+  ctx.font = "bold 40px Arial"; ctx.fillText("Week 1", 297.5, 80);
+  
+  let nameSize = 55; ctx.font = `bold ${nameSize}px Arial`;
+  while(ctx.measureText(name).width > 515 && nameSize > 20) { nameSize -= 2; ctx.font = `bold ${nameSize}px Arial`; }
+  ctx.fillText(name, 297.5, 160);
+  
+  let addrSize = 20; ctx.font = `${addrSize}px Arial`;
+  while(ctx.measureText(addr).width > 515 && addrSize > 12) { addrSize -= 1; ctx.font = `${addrSize}px Arial`; }
+  ctx.fillText(addr, 297.5, 200);
+
+  ctx.font = "bold 18px Arial"; ctx.fillText("START DATE:", 297.5, 280);
+  ctx.font = "bold 36px Arial"; ctx.fillText(dateStr, 297.5, 320);
+  ctx.font = "italic 16px Arial"; ctx.fillText("Keep out of the sight and reach of children", 297.5, 360);
+
+  ctx.save();
+  ctx.translate(297.5, 842); ctx.rotate(Math.PI);
+  ctx.textAlign = "left";
+  ctx.strokeRect(-80, 80, 160, 50);
+  ctx.font = "10px Arial"; ctx.fillText("Checked by:", -75, 95);
+  ctx.font = "bold 12px Arial"; ctx.fillText(document.getElementById('checkIn').value, -75, 115);
+  ctx.strokeRect(-80, 20, 160, 50);
+  ctx.font = "10px Arial"; ctx.fillText("Dispensed by:", -75, 35);
+  ctx.font = "bold 12px Arial"; ctx.fillText(document.getElementById('dispIn').value, -75, 55);
+  ctx.restore();
+}
+
+async function generate(shouldDownload) {
+  const dlBtn = document.getElementById('dlBtn');
+  const prBtn = document.getElementById('prBtn');
+  dlBtn.disabled = prBtn.disabled = true;
+
+  try {
+    const { PDFDocument, rgb, StandardFonts, degrees } = PDFLib;
+    const outDoc = await PDFDocument.create();
+    const pdfSrc = await PDFDocument.load(appState.pdfBuffer);
+    const fBold = await outDoc.embedFont(StandardFonts.HelveticaBold);
+    const fReg = await outDoc.embedFont(StandardFonts.Helvetica);
+    const fItalic = await outDoc.embedFont(StandardFonts.HelveticaOblique);
+    const logo = appState.logoBuffer ? (appState.logoType === 'png' ? await outDoc.embedPng(appState.logoBuffer) : await outDoc.embedJpg(appState.logoBuffer)) : null;
+
+    const name = document.getElementById('nameIn').value;
+    const addr = document.getElementById('addrIn').value;
+    const check = document.getElementById('checkIn').value;
+    const disp = document.getElementById('dispIn').value;
+
+    const pages = await outDoc.copyPages(pdfSrc, pdfSrc.getPageIndices());
+    for(let i=0; i<pages.length; i++) {
+      outDoc.addPage(pages[i]);
+      const page = outDoc.addPage([595, 842]);
+      const cx = 297.5;
+      const d = new Date(appState.startDate);
+      d.setDate(d.getDate() + (i*7));
+      const dStr = formatDate(d);
+
+      page.drawLine({ start:{x:0,y:421}, end:{x:595,y:421}, color:rgb(0.8,0.8,0.8), dashArray:[5,5] });
+      if(logo) page.drawImage(logo, {x:465, y:842-30-(90/logo.width*logo.height), width:90, height:90/logo.width*logo.height});
+
+      const drawAuto = (txt, y, size, font) => {
+        let curSize = size;
+        while(font.widthOfTextAtSize(txt, curSize) > 515 && curSize > 12) curSize -= 2;
+        page.drawText(txt, {x:cx-font.widthOfTextAtSize(txt, curSize)/2, y:y, size:curSize, font:font, color:rgb(0,0,0)});
+      };
+
+      drawAuto(`Week ${i+1}`, 742, 40, fBold);
+      drawAuto(name, 662, 55, fBold);
+      drawAuto(addr, 632, 20, fReg);
+      drawAuto("START DATE:", 562, 18, fBold);
+      drawAuto(dStr, 522, 32, fBold);
+      drawAuto("Keep out of the sight and reach of children", 482, 16, fItalic);
+
+      page.drawRectangle({ x:cx+80, y:130, width:160, height:50, borderColor:rgb(0,0,0), borderWidth:1, rotate:degrees(180) });
+      page.drawText("Checked by:", { x:cx+75, y:115, size:10, font:fReg, rotate:degrees(180) });
+      page.drawText(check, { x:cx+75, y:95, size:12, font:fBold, rotate:degrees(180) });
+      page.drawRectangle({ x:cx+80, y:70, width:160, height:50, borderColor:rgb(0,0,0), borderWidth:1, rotate:degrees(180) });
+      page.drawText("Dispensed by:", { x:cx+75, y:55, size:10, font:fReg, rotate:degrees(180) });
+      page.drawText(disp, { x:cx+75, y:35, size:12, font:fBold, rotate:degrees(180) });
+    }
+    const pdfBytes = await outDoc.save();
+    const pdfUrl = URL.createObjectURL(new Blob([pdfBytes], {type:'application/pdf'}));
+
+    if (shouldDownload) {
+      const link = document.createElement('a');
+      link.href = pdfUrl;
+      link.download = `Nomad_${name.replace(/\s/g,'_')}.pdf`;
+      link.click();
+    } else {
+      const printWin = window.open(pdfUrl, '_blank');
+      printWin.focus();
+    }
+  } catch(e) { alert(e.message); }
+  dlBtn.disabled = prBtn.disabled = false;
+}
+</script>
+</body>
+</html>
